@@ -89,12 +89,23 @@
     .tool-btn.danger { color: #dc2626; border-color: #fecaca; }
     .tool-btn.danger:hover { background: #fef2f2; }
 
+    .zoom-label {
+      font-size: 12px;
+      min-width: 38px;
+      text-align: center;
+      color: var(--hub-text-muted, #6b7280);
+      flex-shrink: 0;
+      cursor: pointer;
+      user-select: none;
+    }
+    .zoom-label:hover { color: var(--hub-text, #111827); }
+
     /* ── Canvas area ── */
     #canvas-wrap {
       flex: 1;
       position: relative;
       overflow: hidden;
-      background: #ffffff;
+      background: var(--hub-bg, #f9fafb);
     }
 
     #wb-canvas {
@@ -105,6 +116,8 @@
       cursor: crosshair;
     }
     body.eraser-mode #wb-canvas { cursor: cell; }
+    body.pan-mode #wb-canvas { cursor: grab; }
+    body.pan-mode.panning #wb-canvas { cursor: grabbing; }
 
     /* ── Cursor overlay ── */
     #cursor-overlay {
@@ -128,17 +141,6 @@
       border: 2px solid rgba(255,255,255,0.7);
       transition: left 0.05s, top 0.05s;
     }
-
-    /* ── Status bar ── */
-    #status-bar {
-      position: absolute;
-      bottom: 8px;
-      right: 10px;
-      font-size: 11px;
-      color: var(--hub-text-muted, #6b7280);
-      pointer-events: none;
-      user-select: none;
-    }
   </style>
 </head>
 <body>
@@ -148,7 +150,6 @@
 <div id="canvas-wrap">
   <canvas id="wb-canvas"></canvas>
   <div id="cursor-overlay"></div>
-  <div id="status-bar"></div>
 </div>
 
 <script type="module">
@@ -162,11 +163,14 @@ const STREAM_URL = window.__STREAM_URL   ?? "";
 const APP_ID     = window.__APP_ID       ?? "whiteboard";
 const ME         = window.__CURRENT_MEMBER ?? null;
 
-// ── Drawing state ────────────────────────────────────────────────────────────
-const COLORS = ["#111827","#ef4444","#f97316","#eab308","#22c55e","#3b82f6","#8b5cf6","#ec4899"];
-const WIDTHS = [{ value: 2, label: "S" }, { value: 5, label: "M" }, { value: 10, label: "L" }];
+// ── World / drawing constants ────────────────────────────────────────────────
+const WORLD_W    = 1920;
+const WORLD_H    = 1080;
+const COLORS     = ["#111827","#ef4444","#f97316","#eab308","#22c55e","#3b82f6","#8b5cf6","#ec4899"];
+const WIDTHS     = [{ value: 2, label: "S" }, { value: 5, label: "M" }, { value: 10, label: "L" }];
 const MAX_STROKES = 2000;
 
+// ── Drawing state ────────────────────────────────────────────────────────────
 let members    = [];
 let memberMap  = new Map();
 let strokes    = [];
@@ -175,14 +179,50 @@ let isEraser   = false;
 let selColor   = COLORS[0];
 let selWidth   = WIDTHS[1].value;
 
-const seenIds      = new Set();
+const seenIds       = new Set();
 const activeMembers = new Map();
+
+// ── Viewport state ───────────────────────────────────────────────────────────
+let viewport           = { x: 0, y: 0, scale: 1 };
+let viewportReady      = false;
+const activePointers   = new Map();   // pointerId → {x, y}
+let lastPinchState     = null;
+let panDrag            = null;        // {sx, sy, vx, vy}
+let spaceDown          = false;
 
 // ── Canvas setup ─────────────────────────────────────────────────────────────
 const canvas  = document.getElementById("wb-canvas");
 const ctx     = canvas.getContext("2d");
 const overlay = document.getElementById("cursor-overlay");
-const status  = document.getElementById("status-bar");
+
+function getCanvasCSS() {
+  return { w: canvas.offsetWidth, h: canvas.offsetHeight };
+}
+
+function minScale() {
+  const { w, h } = getCanvasCSS();
+  return Math.min(w / WORLD_W, h / WORLD_H);
+}
+
+function clampViewport() {
+  const { w, h } = getCanvasCSS();
+  const min = minScale();
+  viewport.scale = Math.max(min, Math.min(4, viewport.scale));
+  const visW = w / viewport.scale;
+  const visH = h / viewport.scale;
+  viewport.x = visW >= WORLD_W
+    ? -(visW - WORLD_W) / 2
+    : Math.max(0, Math.min(WORLD_W - visW, viewport.x));
+  viewport.y = visH >= WORLD_H
+    ? -(visH - WORLD_H) / 2
+    : Math.max(0, Math.min(WORLD_H - visH, viewport.y));
+}
+
+function fitToScreen() {
+  const { w, h } = getCanvasCSS();
+  viewport.scale = Math.min(w / WORLD_W, h / WORLD_H);
+  clampViewport();
+}
 
 function resizeCanvas() {
   const dpr  = window.devicePixelRatio || 1;
@@ -191,8 +231,32 @@ function resizeCanvas() {
   canvas.height = rect.height * dpr;
   canvas.style.width  = rect.width  + "px";
   canvas.style.height = rect.height + "px";
-  ctx.scale(dpr, dpr);
+  if (!viewportReady) {
+    fitToScreen();
+    viewportReady = true;
+  } else {
+    clampViewport();
+  }
   redrawAll();
+}
+
+// ── Coordinate conversion ─────────────────────────────────────────────────────
+function screenToWorld(sx, sy) {
+  return [sx / viewport.scale + viewport.x, sy / viewport.scale + viewport.y];
+}
+
+function worldToScreen(wx, wy) {
+  return [(wx - viewport.x) * viewport.scale, (wy - viewport.y) * viewport.scale];
+}
+
+function applyViewportTransform() {
+  const dpr = window.devicePixelRatio || 1;
+  ctx.setTransform(
+    viewport.scale * dpr, 0,
+    0, viewport.scale * dpr,
+    -viewport.x * viewport.scale * dpr,
+    -viewport.y * viewport.scale * dpr
+  );
 }
 
 // ── Rendering ────────────────────────────────────────────────────────────────
@@ -208,14 +272,6 @@ function drawPath(points, color, width) {
   ctx.stroke();
 }
 
-function redrawAll() {
-  const dpr  = window.devicePixelRatio || 1;
-  const w    = canvas.width  / dpr;
-  const h    = canvas.height / dpr;
-  ctx.clearRect(0, 0, w, h);
-  for (const s of strokes) renderStroke(s);
-}
-
 function renderStroke(s) {
   if (s.color === null) {
     ctx.globalCompositeOperation = "destination-out";
@@ -226,25 +282,135 @@ function renderStroke(s) {
   }
 }
 
+function redrawAll() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  applyViewportTransform();
+
+  // World background + drop shadow
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,0.12)";
+  ctx.shadowBlur  = 24 / viewport.scale;
+  ctx.shadowOffsetY = 4 / viewport.scale;
+  ctx.fillStyle   = "#ffffff";
+  ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+  ctx.restore();
+
+  for (const s of strokes) renderStroke(s);
+  if (current) renderStroke(current);
+}
+
+// ── Zoom helpers ──────────────────────────────────────────────────────────────
+function zoomAround(screenCx, screenCy, factor) {
+  const [wx, wy] = screenToWorld(screenCx, screenCy);
+  viewport.scale = Math.max(minScale(), Math.min(4, viewport.scale * factor));
+  viewport.x = wx - screenCx / viewport.scale;
+  viewport.y = wy - screenCy / viewport.scale;
+  clampViewport();
+  redrawAll();
+  updateZoomLabel();
+}
+
+window.zoomIn  = () => { const { w, h } = getCanvasCSS(); zoomAround(w / 2, h / 2, 1.25); };
+window.zoomOut = () => { const { w, h } = getCanvasCSS(); zoomAround(w / 2, h / 2, 1 / 1.25); };
+window.zoomFit = () => { fitToScreen(); redrawAll(); updateZoomLabel(); };
+
+function updateZoomLabel() {
+  const el = document.getElementById("zoom-label");
+  if (el) el.textContent = Math.round(viewport.scale * 100) + "%";
+}
+
 // ── Pointer events ───────────────────────────────────────────────────────────
+function getPinchState() {
+  const pts = [...activePointers.values()];
+  const [a, b] = pts;
+  return {
+    dist: Math.hypot(b.x - a.x, b.y - a.y),
+    cx: (a.x + b.x) / 2,
+    cy: (a.y + b.y) / 2,
+  };
+}
+
+function handlePinch() {
+  const pinch = getPinchState();
+  if (!lastPinchState) { lastPinchState = pinch; return; }
+
+  // World point under old pinch center, before scale change
+  const [wx, wy] = screenToWorld(lastPinchState.cx, lastPinchState.cy);
+
+  viewport.scale = Math.max(minScale(), Math.min(4, viewport.scale * (pinch.dist / lastPinchState.dist)));
+
+  // Anchor that world point under the new pinch center (captures both zoom + pan)
+  viewport.x = wx - pinch.cx / viewport.scale;
+  viewport.y = wy - pinch.cy / viewport.scale;
+  clampViewport();
+  lastPinchState = pinch;
+  redrawAll();
+  updateZoomLabel();
+}
+
 canvas.addEventListener("pointerdown", e => {
+  activePointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
   canvas.setPointerCapture(e.pointerId);
+
+  if (activePointers.size >= 2) {
+    current = null;
+    lastPinchState = null;
+    return;
+  }
+
+  if (spaceDown || e.button === 1) {
+    panDrag = { sx: e.offsetX, sy: e.offsetY, vx: viewport.x, vy: viewport.y };
+    document.body.classList.add("panning");
+    return;
+  }
+
+  const [wx, wy] = screenToWorld(e.offsetX, e.offsetY);
+  if (wx < 0 || wx > WORLD_W || wy < 0 || wy > WORLD_H) return;
+
   current = {
-    points: [[e.offsetX, e.offsetY]],
+    points: [[wx, wy]],
     color:  isEraser ? null : selColor,
     width:  isEraser ? 24 : selWidth,
   };
 });
 
 canvas.addEventListener("pointermove", e => {
-  if (current) {
-    current.points.push([e.offsetX, e.offsetY]);
-    renderStroke(current);
+  activePointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
+
+  if (activePointers.size >= 2) {
+    handlePinch();
+    return;
   }
-  throttleCursor(e.offsetX, e.offsetY);
+
+  if (panDrag) {
+    viewport.x = panDrag.vx - (e.offsetX - panDrag.sx) / viewport.scale;
+    viewport.y = panDrag.vy - (e.offsetY - panDrag.sy) / viewport.scale;
+    clampViewport();
+    redrawAll();
+    return;
+  }
+
+  if (current) {
+    const [wx, wy] = screenToWorld(e.offsetX, e.offsetY);
+    current.points.push([wx, wy]);
+    redrawAll();
+  }
+
+  const [wx, wy] = screenToWorld(e.offsetX, e.offsetY);
+  throttleCursor(wx, wy);
 });
 
-canvas.addEventListener("pointerup", () => {
+canvas.addEventListener("pointerup", e => {
+  activePointers.delete(e.pointerId);
+  lastPinchState = null;
+
+  if (panDrag) {
+    panDrag = null;
+    document.body.classList.remove("panning");
+    return;
+  }
+
   if (!current || current.points.length < 2) { current = null; return; }
   const stroke = { ...current, id: crypto.randomUUID(), memberId: ME?.id ?? "anon", ts: Date.now() };
   seenIds.add(stroke.id);
@@ -253,14 +419,43 @@ canvas.addEventListener("pointerup", () => {
   trimStrokes();
   saveStrokes();
   publishStroke(stroke);
+  redrawAll();
 });
 
-canvas.addEventListener("pointercancel", () => { current = null; });
+canvas.addEventListener("pointercancel", e => {
+  activePointers.delete(e.pointerId);
+  current = null;
+  panDrag = null;
+  lastPinchState = null;
+  document.body.classList.remove("panning");
+});
+
+// ── Scroll-wheel zoom ────────────────────────────────────────────────────────
+canvas.addEventListener("wheel", e => {
+  e.preventDefault();
+  zoomAround(e.offsetX, e.offsetY, e.deltaY < 0 ? 1.1 : 1 / 1.1);
+}, { passive: false });
+
+// ── Space key for pan ────────────────────────────────────────────────────────
+document.addEventListener("keydown", e => {
+  if (e.code === "Space" && !e.target.matches("input, textarea")) {
+    e.preventDefault();
+    spaceDown = true;
+    document.body.classList.add("pan-mode");
+  }
+});
+document.addEventListener("keyup", e => {
+  if (e.code === "Space") {
+    spaceDown = false;
+    panDrag   = null;
+    document.body.classList.remove("pan-mode", "panning");
+  }
+});
 
 // ── Cursor broadcast ─────────────────────────────────────────────────────────
 let lastCursorBroadcast = 0;
 
-function throttleCursor(x, y) {
+function throttleCursor(wx, wy) {
   if (!ME || !EVENTS_URL) return;
   const now = Date.now();
   if (now - lastCursorBroadcast < 200) return;
@@ -271,20 +466,23 @@ function throttleCursor(x, y) {
     body: JSON.stringify({
       source_app_id: APP_ID,
       type: "cursor",
-      payload: { memberId: ME.id, x, y },
+      payload: { memberId: ME.id, x: wx, y: wy },
     }),
   }).catch(() => {});
 }
 
 function renderCursors() {
   const now = Date.now();
+  const { w, h } = getCanvasCSS();
   overlay.innerHTML = "";
   for (const [id, info] of activeMembers) {
     if (now - info.lastSeen > 5000) { activeMembers.delete(id); continue; }
+    const [sx, sy] = worldToScreen(info.x, info.y);
+    if (sx < -14 || sy < -14 || sx > w + 14 || sy > h + 14) continue;
     const dot = document.createElement("div");
     dot.className = "cursor-dot";
-    dot.style.left = info.x + "px";
-    dot.style.top  = info.y + "px";
+    dot.style.left = sx + "px";
+    dot.style.top  = sy + "px";
     dot.style.background = info.color;
     dot.textContent = info.initials;
     overlay.appendChild(dot);
@@ -427,8 +625,8 @@ function renderToolbar() {
   const swatches = COLORS.map(c => `
     <button class="color-swatch${!isEraser && selColor === c ? " active" : ""}"
       style="background:${c}"
-      onclick="setColor('${c}')"
-      title="${c}"></button>
+      onclick="setColor('${esc(c)}')"
+      title="${esc(c)}"></button>
   `).join("");
 
   const widths = WIDTHS.map(({ value, label }) => `
@@ -440,6 +638,8 @@ function renderToolbar() {
       </svg>
     </button>
   `).join("");
+
+  const zoomPct = Math.round(viewport.scale * 100);
 
   tb.innerHTML = `
     ${swatches}
@@ -459,6 +659,10 @@ function renderToolbar() {
       </svg>
       Clear
     </button>
+    <div class="toolbar-sep"></div>
+    <button class="tool-btn" onclick="zoomOut()" title="Zoom out">−</button>
+    <span id="zoom-label" class="zoom-label" onclick="zoomFit()" title="Fit to screen">${zoomPct}%</span>
+    <button class="tool-btn" onclick="zoomIn()" title="Zoom in">+</button>
   `;
 }
 
