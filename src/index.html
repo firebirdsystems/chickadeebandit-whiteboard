@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Whiteboard</title>
+  <base href="/run/whiteboard/" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: var(--hub-font, system-ui, sans-serif);
+      font-size: var(--hub-font-size, 14px);
+      background: var(--hub-bg, #f9fafb);
+      color: var(--hub-text, #111827);
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── Toolbar ── */
+    #toolbar {
+      flex-shrink: 0;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 12px;
+      background: var(--hub-surface, #fff);
+      border-bottom: 1px solid var(--hub-border, #e5e7eb);
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    #toolbar::-webkit-scrollbar { display: none; }
+
+    .toolbar-sep {
+      width: 1px;
+      height: 28px;
+      background: var(--hub-border, #e5e7eb);
+      flex-shrink: 0;
+    }
+
+    .color-swatch {
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      border: 2px solid transparent;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: transform 0.1s;
+    }
+    .color-swatch:hover { transform: scale(1.15); }
+    .color-swatch.active { border-color: var(--hub-text, #111827); outline: 2px solid var(--hub-surface, #fff); outline-offset: -3px; }
+
+    .width-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      border-radius: var(--hub-radius, 6px);
+      border: 1px solid var(--hub-border, #e5e7eb);
+      background: transparent;
+      cursor: pointer;
+      flex-shrink: 0;
+      color: var(--hub-text, #111827);
+    }
+    .width-btn:hover { background: var(--hub-bg, #f9fafb); }
+    .width-btn.active { background: var(--hub-primary, #111827); color: var(--hub-primary-fg, #fff); border-color: var(--hub-primary, #111827); }
+
+    .tool-btn {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 0 10px;
+      height: 32px;
+      border-radius: var(--hub-radius, 6px);
+      border: 1px solid var(--hub-border, #e5e7eb);
+      background: transparent;
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+      font-size: 13px;
+      color: var(--hub-text, #111827);
+    }
+    .tool-btn:hover { background: var(--hub-bg, #f9fafb); }
+    .tool-btn.active { background: var(--hub-primary, #111827); color: var(--hub-primary-fg, #fff); border-color: var(--hub-primary, #111827); }
+    .tool-btn.danger { color: #dc2626; border-color: #fecaca; }
+    .tool-btn.danger:hover { background: #fef2f2; }
+
+    /* ── Canvas area ── */
+    #canvas-wrap {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+      background: #ffffff;
+    }
+
+    #wb-canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+      cursor: crosshair;
+    }
+    body.eraser-mode #wb-canvas { cursor: cell; }
+
+    /* ── Cursor overlay ── */
+    #cursor-overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+
+    .cursor-dot {
+      position: absolute;
+      transform: translate(-50%, -50%);
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 700;
+      color: #fff;
+      border: 2px solid rgba(255,255,255,0.7);
+      transition: left 0.05s, top 0.05s;
+    }
+
+    /* ── Status bar ── */
+    #status-bar {
+      position: absolute;
+      bottom: 8px;
+      right: 10px;
+      font-size: 11px;
+      color: var(--hub-text-muted, #6b7280);
+      pointer-events: none;
+      user-select: none;
+    }
+  </style>
+</head>
+<body>
+
+<div id="toolbar"></div>
+
+<div id="canvas-wrap">
+  <canvas id="wb-canvas"></canvas>
+  <div id="cursor-overlay"></div>
+  <div id="status-bar"></div>
+</div>
+
+<script type="module">
+import { memberColor, initial, esc, hubConfirm, createStreamHelper } from "/hub-sdk.js";
+
+// ── Hub globals ──────────────────────────────────────────────────────────────
+const CONTEXT    = window.__CONTEXT_URL  ?? "";
+const STORE      = window.__STORE_URL    ?? "";
+const EVENTS_URL = window.__EVENTS_URL   ?? "";
+const STREAM_URL = window.__STREAM_URL   ?? "";
+const APP_ID     = window.__APP_ID       ?? "whiteboard";
+const ME         = window.__CURRENT_MEMBER ?? null;
+
+// ── Drawing state ────────────────────────────────────────────────────────────
+const COLORS = ["#111827","#ef4444","#f97316","#eab308","#22c55e","#3b82f6","#8b5cf6","#ec4899"];
+const WIDTHS = [{ value: 2, label: "S" }, { value: 5, label: "M" }, { value: 10, label: "L" }];
+const MAX_STROKES = 2000;
+
+let members    = [];
+let memberMap  = new Map();
+let strokes    = [];
+let current    = null;
+let isEraser   = false;
+let selColor   = COLORS[0];
+let selWidth   = WIDTHS[1].value;
+
+const seenIds      = new Set();
+const activeMembers = new Map();
+
+// ── Canvas setup ─────────────────────────────────────────────────────────────
+const canvas  = document.getElementById("wb-canvas");
+const ctx     = canvas.getContext("2d");
+const overlay = document.getElementById("cursor-overlay");
+const status  = document.getElementById("status-bar");
+
+function resizeCanvas() {
+  const dpr  = window.devicePixelRatio || 1;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width  = rect.width  * dpr;
+  canvas.height = rect.height * dpr;
+  canvas.style.width  = rect.width  + "px";
+  canvas.style.height = rect.height + "px";
+  ctx.scale(dpr, dpr);
+  redrawAll();
+}
+
+// ── Rendering ────────────────────────────────────────────────────────────────
+function drawPath(points, color, width) {
+  if (points.length < 2) return;
+  ctx.beginPath();
+  ctx.strokeStyle = color ?? "#000";
+  ctx.lineWidth   = width;
+  ctx.lineCap     = "round";
+  ctx.lineJoin    = "round";
+  ctx.moveTo(points[0][0], points[0][1]);
+  for (let i = 1; i < points.length; i++) ctx.lineTo(points[i][0], points[i][1]);
+  ctx.stroke();
+}
+
+function redrawAll() {
+  const dpr  = window.devicePixelRatio || 1;
+  const w    = canvas.width  / dpr;
+  const h    = canvas.height / dpr;
+  ctx.clearRect(0, 0, w, h);
+  for (const s of strokes) renderStroke(s);
+}
+
+function renderStroke(s) {
+  if (s.color === null) {
+    ctx.globalCompositeOperation = "destination-out";
+    drawPath(s.points, "#000", s.width);
+    ctx.globalCompositeOperation = "source-over";
+  } else {
+    drawPath(s.points, s.color, s.width);
+  }
+}
+
+// ── Pointer events ───────────────────────────────────────────────────────────
+canvas.addEventListener("pointerdown", e => {
+  canvas.setPointerCapture(e.pointerId);
+  current = {
+    points: [[e.offsetX, e.offsetY]],
+    color:  isEraser ? null : selColor,
+    width:  isEraser ? 24 : selWidth,
+  };
+});
+
+canvas.addEventListener("pointermove", e => {
+  if (current) {
+    current.points.push([e.offsetX, e.offsetY]);
+    renderStroke(current);
+  }
+  throttleCursor(e.offsetX, e.offsetY);
+});
+
+canvas.addEventListener("pointerup", () => {
+  if (!current || current.points.length < 2) { current = null; return; }
+  const stroke = { ...current, id: crypto.randomUUID(), memberId: ME?.id ?? "anon", ts: Date.now() };
+  seenIds.add(stroke.id);
+  strokes.push(stroke);
+  current = null;
+  trimStrokes();
+  saveStrokes();
+  publishStroke(stroke);
+});
+
+canvas.addEventListener("pointercancel", () => { current = null; });
+
+// ── Cursor broadcast ─────────────────────────────────────────────────────────
+let lastCursorBroadcast = 0;
+
+function throttleCursor(x, y) {
+  if (!ME || !EVENTS_URL) return;
+  const now = Date.now();
+  if (now - lastCursorBroadcast < 200) return;
+  lastCursorBroadcast = now;
+  fetch(EVENTS_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      source_app_id: APP_ID,
+      type: "cursor",
+      payload: { memberId: ME.id, x, y },
+    }),
+  }).catch(() => {});
+}
+
+function renderCursors() {
+  const now = Date.now();
+  overlay.innerHTML = "";
+  for (const [id, info] of activeMembers) {
+    if (now - info.lastSeen > 5000) { activeMembers.delete(id); continue; }
+    const dot = document.createElement("div");
+    dot.className = "cursor-dot";
+    dot.style.left = info.x + "px";
+    dot.style.top  = info.y + "px";
+    dot.style.background = info.color;
+    dot.textContent = info.initials;
+    overlay.appendChild(dot);
+  }
+}
+
+setInterval(renderCursors, 3_000);
+
+// ── SSE stream ───────────────────────────────────────────────────────────────
+function onEvent(e) {
+  if (e.type === "stroke") {
+    const { strokeId, points, color, width, memberId } = e.payload ?? {};
+    if (!strokeId || seenIds.has(strokeId)) return;
+    seenIds.add(strokeId);
+    const s = { id: strokeId, points, color, width, memberId, ts: Date.now() };
+    strokes.push(s);
+    renderStroke(s);
+    trimStrokes();
+    saveStrokes();
+  } else if (e.type === "canvas_cleared") {
+    strokes = [];
+    redrawAll();
+    saveStrokes();
+  } else if (e.type === "cursor") {
+    const { memberId, x, y } = e.payload ?? {};
+    if (!memberId || memberId === ME?.id) return;
+    const member = memberMap.get(memberId);
+    activeMembers.set(memberId, {
+      x, y,
+      lastSeen: Date.now(),
+      color:    member ? memberColor(memberId, members) : "#6b7280",
+      initials: member ? initial(member.name) : "?",
+    });
+    renderCursors();
+  }
+}
+
+const stream = createStreamHelper(STREAM_URL, null, onEvent);
+stream.connect();
+
+// ── KV persistence ───────────────────────────────────────────────────────────
+let saveTimer = null;
+
+function saveStrokes() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    if (!STORE) return;
+    await fetch(STORE, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: "strokes", value: JSON.stringify(strokes) }),
+    }).catch(() => {});
+  }, 500);
+}
+
+async function loadStrokes() {
+  if (!STORE) return;
+  try {
+    const res  = await fetch(`${STORE}?key=strokes`);
+    if (!res.ok) return;
+    const json = await res.json();
+    strokes    = json.value ? JSON.parse(json.value) : [];
+    for (const s of strokes) seenIds.add(s.id);
+  } catch { strokes = []; }
+}
+
+function trimStrokes() {
+  if (strokes.length > MAX_STROKES) strokes = strokes.slice(-MAX_STROKES);
+}
+
+// ── Event publishing ─────────────────────────────────────────────────────────
+async function publishStroke(stroke) {
+  if (!EVENTS_URL) return;
+  await fetch(EVENTS_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      source_app_id: APP_ID,
+      type: "stroke",
+      payload: {
+        strokeId:  stroke.id,
+        points:    stroke.points,
+        color:     stroke.color,
+        width:     stroke.width,
+        memberId:  stroke.memberId,
+      },
+    }),
+  }).catch(() => {});
+}
+
+async function publishClear() {
+  if (!EVENTS_URL) return;
+  await fetch(EVENTS_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      source_app_id: APP_ID,
+      type: "canvas_cleared",
+      payload: { memberId: ME?.id ?? "anon" },
+    }),
+  }).catch(() => {});
+}
+
+// ── Clear ────────────────────────────────────────────────────────────────────
+window.clearCanvas = async function() {
+  const ok = await hubConfirm("Clear the whiteboard?", {
+    description: "All strokes will be removed for everyone.",
+    confirmLabel: "Clear",
+    destructive: true,
+  });
+  if (!ok) return;
+  strokes = [];
+  redrawAll();
+  saveStrokes();
+  publishClear();
+};
+
+// ── Tool selection ───────────────────────────────────────────────────────────
+window.setColor = function(color) {
+  isEraser = false;
+  selColor = color;
+  document.body.classList.remove("eraser-mode");
+  renderToolbar();
+};
+
+window.setWidth = function(w) {
+  selWidth = w;
+  renderToolbar();
+};
+
+window.toggleEraser = function() {
+  isEraser = !isEraser;
+  document.body.classList.toggle("eraser-mode", isEraser);
+  renderToolbar();
+};
+
+// ── Toolbar rendering ────────────────────────────────────────────────────────
+function renderToolbar() {
+  const tb = document.getElementById("toolbar");
+  const swatches = COLORS.map(c => `
+    <button class="color-swatch${!isEraser && selColor === c ? " active" : ""}"
+      style="background:${c}"
+      onclick="setColor('${c}')"
+      title="${c}"></button>
+  `).join("");
+
+  const widths = WIDTHS.map(({ value, label }) => `
+    <button class="width-btn${!isEraser && selWidth === value ? " active" : ""}"
+      onclick="setWidth(${value})"
+      title="Stroke size ${label}">
+      <svg width="18" height="18" viewBox="0 0 18 18">
+        <line x1="2" y1="9" x2="16" y2="9" stroke="currentColor" stroke-width="${value}" stroke-linecap="round"/>
+      </svg>
+    </button>
+  `).join("");
+
+  tb.innerHTML = `
+    ${swatches}
+    <div class="toolbar-sep"></div>
+    ${widths}
+    <div class="toolbar-sep"></div>
+    <button class="tool-btn${isEraser ? " active" : ""}" onclick="toggleEraser()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 20H7L3 16l10-10 7 7-2.5 2.5"/><path d="M6.0001 11L13 18"/>
+      </svg>
+      Eraser
+    </button>
+    <div class="toolbar-sep"></div>
+    <button class="tool-btn danger" onclick="clearCanvas()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>
+      </svg>
+      Clear
+    </button>
+  `;
+}
+
+// ── Members ──────────────────────────────────────────────────────────────────
+async function loadMembers() {
+  if (!CONTEXT) {
+    members = [
+      { id: "demo-1", name: "Alex",  role: "adult" },
+      { id: "demo-2", name: "Sam",   role: "adult" },
+      { id: "demo-3", name: "Jamie", role: "child" },
+    ];
+    memberMap = new Map(members.map(m => [m.id, m]));
+    return;
+  }
+  try {
+    const res = await fetch(`${CONTEXT}?keys=family.members`);
+    members   = ((await res.json())["family.members"]) ?? [];
+  } catch { members = []; }
+  memberMap = new Map(members.map(m => [m.id, m]));
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+window.addEventListener("resize", resizeCanvas);
+
+(async () => {
+  renderToolbar();
+  resizeCanvas();
+  await Promise.all([loadMembers(), loadStrokes()]);
+  redrawAll();
+})();
+</script>
+</body>
+</html>

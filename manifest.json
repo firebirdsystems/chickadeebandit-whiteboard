@@ -1,0 +1,25 @@
+{
+  "id": "whiteboard",
+  "name": "Whiteboard",
+  "version": "1.0.0",
+  "description": "A shared canvas for the whole household. Draw together in real time — strokes sync instantly across all devices.",
+  "entrypoint": "index.html",
+  "runtime": "static",
+  "category": "tools",
+  "tags": ["drawing", "whiteboard", "collaboration", "canvas"],
+  "data_access": {
+    "reads": ["family.members"],
+    "writes": []
+  },
+  "permissions": {
+    "default_audience": "everyone",
+    "requires_approval": false
+  },
+  "storage": "kv",
+  "widget": {
+    "label": "Whiteboard",
+    "size": "medium"
+  },
+  "nav": { "label": "Whiteboard" },
+  "icon": "🎨"
+}
