@@ -5,7 +5,7 @@
   "description": "A shared canvas for the whole household. Draw together in real time — strokes sync instantly across all devices.",
   "entrypoint": "index.html",
   "runtime": "static",
-  "category": "tools",
+  "category": "genaral",
   "tags": ["drawing", "whiteboard", "collaboration", "canvas"],
   "data_access": {
     "reads": ["family.members"],
