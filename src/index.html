@@ -495,7 +495,7 @@ setInterval(renderCursors, 3_000);
 function onEvent(e) {
   if (e.type === "stroke") {
     const { strokeId, points, color, width, memberId } = e.payload ?? {};
-    if (!strokeId || seenIds.has(strokeId)) return;
+    if (!strokeId || seenIds.has(strokeId) || !Array.isArray(points) || points.length < 2) return;
     seenIds.add(strokeId);
     const s = { id: strokeId, points, color, width, memberId, ts: Date.now() };
     strokes.push(s);
@@ -550,7 +550,11 @@ async function loadStrokes() {
 }
 
 function trimStrokes() {
-  if (strokes.length > MAX_STROKES) strokes = strokes.slice(-MAX_STROKES);
+  if (strokes.length > MAX_STROKES) {
+    strokes = strokes.slice(-MAX_STROKES);
+    seenIds.clear();
+    for (const s of strokes) seenIds.add(s.id);
+  }
 }
 
 // ── Event publishing ─────────────────────────────────────────────────────────

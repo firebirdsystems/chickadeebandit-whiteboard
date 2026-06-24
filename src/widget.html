@@ -153,16 +153,8 @@ async function load() {
     return;
   }
 
-  // Infer the source canvas dimensions from the stroke coordinates
-  let maxX = 0, maxY = 0;
-  for (const s of strokes) {
-    for (const [x, y] of (s.points ?? [])) {
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
-    }
-  }
-  const srcW = Math.max(maxX + 20, 800);
-  const srcH = Math.max(maxY + 20, 600);
+  const srcW = 1920;
+  const srcH = 1080;
 
   renderStrokes(strokes, srcW, srcH);
 
