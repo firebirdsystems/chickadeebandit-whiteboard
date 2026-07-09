@@ -154,6 +154,13 @@
 
 <script type="module">
 import { memberColor, initial, esc, hubConfirm, createStreamHelper } from "/hub-sdk.js";
+import {
+  WORLD_W, WORLD_H, MAX_STROKES,
+  minScale as _minScale, clampViewport as _clampViewport, fitViewport,
+  screenToWorld as _screenToWorld, worldToScreen as _worldToScreen,
+  zoomedViewport, pinchState, pinchedViewport, inWorld,
+  trimStrokes as _trimStrokes, isValidRemoteStroke, isCursorStale, isCursorOnScreen,
+} from "./logic.js";
 
 // ── Hub globals ──────────────────────────────────────────────────────────────
 const CONTEXT    = window.__CONTEXT_URL  ?? "";
@@ -163,12 +170,9 @@ const STREAM_URL = window.__STREAM_URL   ?? "";
 const APP_ID     = window.__APP_ID       ?? "whiteboard";
 const ME         = window.__CURRENT_MEMBER ?? null;
 
-// ── World / drawing constants ────────────────────────────────────────────────
-const WORLD_W    = 1920;
-const WORLD_H    = 1080;
+// ── Drawing constants ────────────────────────────────────────────────────────
 const COLORS     = ["#111827","#ef4444","#f97316","#eab308","#22c55e","#3b82f6","#8b5cf6","#ec4899"];
 const WIDTHS     = [{ value: 2, label: "S" }, { value: 5, label: "M" }, { value: 10, label: "L" }];
-const MAX_STROKES = 2000;
 
 // ── Drawing state ────────────────────────────────────────────────────────────
 let members    = [];
@@ -201,27 +205,17 @@ function getCanvasCSS() {
 
 function minScale() {
   const { w, h } = getCanvasCSS();
-  return Math.min(w / WORLD_W, h / WORLD_H);
+  return _minScale(w, h);
 }
 
 function clampViewport() {
   const { w, h } = getCanvasCSS();
-  const min = minScale();
-  viewport.scale = Math.max(min, Math.min(4, viewport.scale));
-  const visW = w / viewport.scale;
-  const visH = h / viewport.scale;
-  viewport.x = visW >= WORLD_W
-    ? -(visW - WORLD_W) / 2
-    : Math.max(0, Math.min(WORLD_W - visW, viewport.x));
-  viewport.y = visH >= WORLD_H
-    ? -(visH - WORLD_H) / 2
-    : Math.max(0, Math.min(WORLD_H - visH, viewport.y));
+  viewport = _clampViewport(viewport, w, h);
 }
 
 function fitToScreen() {
   const { w, h } = getCanvasCSS();
-  viewport.scale = Math.min(w / WORLD_W, h / WORLD_H);
-  clampViewport();
+  viewport = fitViewport(w, h);
 }
 
 function resizeCanvas() {
@@ -242,11 +236,11 @@ function resizeCanvas() {
 
 // ── Coordinate conversion ─────────────────────────────────────────────────────
 function screenToWorld(sx, sy) {
-  return [sx / viewport.scale + viewport.x, sy / viewport.scale + viewport.y];
+  return _screenToWorld(sx, sy, viewport);
 }
 
 function worldToScreen(wx, wy) {
-  return [(wx - viewport.x) * viewport.scale, (wy - viewport.y) * viewport.scale];
+  return _worldToScreen(wx, wy, viewport);
 }
 
 function applyViewportTransform() {
@@ -302,11 +296,8 @@ function redrawAll() {
 
 // ── Zoom helpers ──────────────────────────────────────────────────────────────
 function zoomAround(screenCx, screenCy, factor) {
-  const [wx, wy] = screenToWorld(screenCx, screenCy);
-  viewport.scale = Math.max(minScale(), Math.min(4, viewport.scale * factor));
-  viewport.x = wx - screenCx / viewport.scale;
-  viewport.y = wy - screenCy / viewport.scale;
-  clampViewport();
+  const { w, h } = getCanvasCSS();
+  viewport = zoomedViewport(viewport, screenCx, screenCy, factor, w, h);
   redrawAll();
   updateZoomLabel();
 }
@@ -322,28 +313,16 @@ function updateZoomLabel() {
 
 // ── Pointer events ───────────────────────────────────────────────────────────
 function getPinchState() {
-  const pts = [...activePointers.values()];
-  const [a, b] = pts;
-  return {
-    dist: Math.hypot(b.x - a.x, b.y - a.y),
-    cx: (a.x + b.x) / 2,
-    cy: (a.y + b.y) / 2,
-  };
+  const [a, b] = [...activePointers.values()];
+  return pinchState(a, b);
 }
 
 function handlePinch() {
   const pinch = getPinchState();
   if (!lastPinchState) { lastPinchState = pinch; return; }
 
-  // World point under old pinch center, before scale change
-  const [wx, wy] = screenToWorld(lastPinchState.cx, lastPinchState.cy);
-
-  viewport.scale = Math.max(minScale(), Math.min(4, viewport.scale * (pinch.dist / lastPinchState.dist)));
-
-  // Anchor that world point under the new pinch center (captures both zoom + pan)
-  viewport.x = wx - pinch.cx / viewport.scale;
-  viewport.y = wy - pinch.cy / viewport.scale;
-  clampViewport();
+  const { w, h } = getCanvasCSS();
+  viewport = pinchedViewport(viewport, lastPinchState, pinch, w, h);
   lastPinchState = pinch;
   redrawAll();
   updateZoomLabel();
@@ -366,7 +345,7 @@ canvas.addEventListener("pointerdown", e => {
   }
 
   const [wx, wy] = screenToWorld(e.offsetX, e.offsetY);
-  if (wx < 0 || wx > WORLD_W || wy < 0 || wy > WORLD_H) return;
+  if (!inWorld(wx, wy)) return;
 
   current = {
     points: [[wx, wy]],
@@ -465,7 +444,7 @@ function throttleCursor(wx, wy) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       source_app_id: APP_ID,
-      type: "cursor",
+      type: "whiteboard.cursor",
       payload: { memberId: ME.id, x: wx, y: wy },
     }),
   }).catch(() => {});
@@ -476,9 +455,9 @@ function renderCursors() {
   const { w, h } = getCanvasCSS();
   overlay.innerHTML = "";
   for (const [id, info] of activeMembers) {
-    if (now - info.lastSeen > 5000) { activeMembers.delete(id); continue; }
+    if (isCursorStale(info.lastSeen, now)) { activeMembers.delete(id); continue; }
     const [sx, sy] = worldToScreen(info.x, info.y);
-    if (sx < -14 || sy < -14 || sx > w + 14 || sy > h + 14) continue;
+    if (!isCursorOnScreen(sx, sy, w, h)) continue;
     const dot = document.createElement("div");
     dot.className = "cursor-dot";
     dot.style.left = sx + "px";
@@ -493,20 +472,20 @@ setInterval(renderCursors, 3_000);
 
 // ── SSE stream ───────────────────────────────────────────────────────────────
 function onEvent(e) {
-  if (e.type === "stroke") {
-    const { strokeId, points, color, width, memberId } = e.payload ?? {};
-    if (!strokeId || seenIds.has(strokeId) || !Array.isArray(points) || points.length < 2) return;
+  if (e.type === "whiteboard.stroke") {
+    if (!isValidRemoteStroke(e.payload, seenIds)) return;
+    const { strokeId, points, color, width, memberId } = e.payload;
     seenIds.add(strokeId);
     const s = { id: strokeId, points, color, width, memberId, ts: Date.now() };
     strokes.push(s);
     renderStroke(s);
     trimStrokes();
     saveStrokes();
-  } else if (e.type === "canvas_cleared") {
+  } else if (e.type === "whiteboard.canvas_cleared") {
     strokes = [];
     redrawAll();
     saveStrokes();
-  } else if (e.type === "cursor") {
+  } else if (e.type === "whiteboard.cursor") {
     const { memberId, x, y } = e.payload ?? {};
     if (!memberId || memberId === ME?.id) return;
     const member = memberMap.get(memberId);
@@ -551,7 +530,7 @@ async function loadStrokes() {
 
 function trimStrokes() {
   if (strokes.length > MAX_STROKES) {
-    strokes = strokes.slice(-MAX_STROKES);
+    strokes = _trimStrokes(strokes);
     seenIds.clear();
     for (const s of strokes) seenIds.add(s.id);
   }
@@ -565,7 +544,7 @@ async function publishStroke(stroke) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       source_app_id: APP_ID,
-      type: "stroke",
+      type: "whiteboard.stroke",
       payload: {
         strokeId:  stroke.id,
         points:    stroke.points,
@@ -584,7 +563,7 @@ async function publishClear() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       source_app_id: APP_ID,
-      type: "canvas_cleared",
+      type: "whiteboard.canvas_cleared",
       payload: { memberId: ME?.id ?? "anon" },
     }),
   }).catch(() => {});
