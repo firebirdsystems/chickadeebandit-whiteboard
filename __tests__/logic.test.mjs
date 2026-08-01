@@ -4,6 +4,7 @@ import {
   minScale, clampViewport, fitViewport, screenToWorld, worldToScreen,
   zoomedViewport, pinchState, pinchedViewport, inWorld,
   trimStrokes, isValidRemoteStroke, isCursorStale, isCursorOnScreen,
+  parseCanvas, isNewerClear,
 } from "../src/logic.js";
 
 // A 960×540 canvas is exactly half the 1920×1080 world in both axes.
@@ -172,5 +173,44 @@ describe("cursor helpers", () => {
     expect(isCursorOnScreen(-15, 0, W, H)).toBe(false);
     expect(isCursorOnScreen(W + 14, H + 14, W, H)).toBe(true);
     expect(isCursorOnScreen(W + 15, H, W, H)).toBe(false);
+  });
+});
+
+// ── parseCanvas / isNewerClear ────────────────────────────────────────────────
+// The canvas moved from a bare JSON array (rewritten in full on every save) to
+// { rev, strokes } appended one stroke at a time. Both shapes must read.
+describe("parseCanvas", () => {
+  it("reads the current object shape", () => {
+    expect(parseCanvas({ rev: 3, strokes: [{ id: "a" }] }))
+      .toEqual({ rev: 3, strokes: [{ id: "a" }], legacy: false });
+  });
+  it("reads a legacy bare array and flags it for upgrade", () => {
+    const out = parseCanvas([{ id: "a" }, { id: "b" }]);
+    expect(out.strokes).toHaveLength(2);
+    expect(out.rev).toBe(0);
+    expect(out.legacy).toBe(true);
+  });
+  it("returns an empty canvas for null, garbage, or a missing strokes array", () => {
+    for (const raw of [null, undefined, 42, "x", {}, { strokes: "nope" }]) {
+      expect(parseCanvas(raw)).toEqual({ rev: 0, strokes: [], legacy: false });
+    }
+  });
+  it("coerces a non-numeric rev to 0 rather than NaN", () => {
+    expect(parseCanvas({ rev: "x", strokes: [] }).rev).toBe(0);
+  });
+});
+
+describe("isNewerClear", () => {
+  it("applies a clear newer than what this client has seen", () => {
+    expect(isNewerClear(4, 3)).toBe(true);
+  });
+  it("ignores a replayed or stale clear", () => {
+    expect(isNewerClear(3, 3)).toBe(false);
+    expect(isNewerClear(2, 3)).toBe(false);
+  });
+  it("honours a clear from a client too old to send a rev", () => {
+    // Ignoring it would leave that member staring at a canvas everyone else
+    // has already wiped.
+    expect(isNewerClear(undefined, 3)).toBe(true);
   });
 });

@@ -75,6 +75,8 @@
 </div>
 
 <script type="module">
+import { parseCanvas } from "./logic.js";
+
 const STORE = window.__STORE_URL ?? "";
 
 const canvas = document.getElementById("wb-canvas");
@@ -144,7 +146,9 @@ async function load() {
     const res = await fetch(`${STORE}?key=strokes`);
     if (res.ok) {
       const json = await res.json();
-      strokes = json.value ? JSON.parse(json.value) : [];
+      // Reads both the current { rev, strokes } shape and the bare array
+      // households stored before the canvas gained a revision.
+      strokes = parseCanvas(json.value ? JSON.parse(json.value) : null).strokes;
     }
   } catch { /* show empty state */ }
 

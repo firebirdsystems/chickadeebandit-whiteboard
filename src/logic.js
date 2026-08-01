@@ -67,6 +67,35 @@ export function trimStrokes(strokes, max = MAX_STROKES) {
   return strokes.length > max ? strokes.slice(-max) : strokes;
 }
 
+/**
+ * Normalizes whatever is stored under the `strokes` key into
+ * `{ rev, strokes }`.
+ *
+ * The canvas used to be persisted as a bare JSON array, rewritten in full on
+ * every save. That is why a clear could be undone: any client still holding the
+ * old array wrote all of it back, stroke for stroke. The object form carries a
+ * revision that a clear increments, so a client can tell it missed one — and
+ * strokes are appended individually (`array_append`) rather than rewritten, so
+ * a stale client contributes only what it actually drew.
+ *
+ * Bare arrays are still read, because households have them stored today.
+ */
+export function parseCanvas(raw) {
+  if (Array.isArray(raw)) return { rev: 0, strokes: raw, legacy: true };
+  if (raw && typeof raw === "object" && Array.isArray(raw.strokes)) {
+    return { rev: Number(raw.rev) || 0, strokes: raw.strokes, legacy: false };
+  }
+  return { rev: 0, strokes: [], legacy: false };
+}
+
+/** Whether an incoming clear is newer than what this client has applied. */
+export function isNewerClear(payloadRev, currentRev) {
+  const rev = Number(payloadRev);
+  // A clear published before revisions existed carries none; honour it rather
+  // than ignoring a real clear from an older client.
+  return Number.isFinite(rev) ? rev > currentRev : true;
+}
+
 export function isValidRemoteStroke(payload, seenIds) {
   const { strokeId, points } = payload ?? {};
   return Boolean(strokeId) && !seenIds.has(strokeId) && Array.isArray(points) && points.length >= 2;

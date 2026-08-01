@@ -153,13 +153,14 @@
 </div>
 
 <script type="module">
-import { memberColor, initial, esc, hubConfirm, createStreamHelper } from "/hub-sdk.js";
+import { memberColor, initial, esc, hubAlert, hubConfirm, createStreamHelper } from "/hub-sdk.js";
 import {
   WORLD_W, WORLD_H, MAX_STROKES,
   minScale as _minScale, clampViewport as _clampViewport, fitViewport,
   screenToWorld as _screenToWorld, worldToScreen as _worldToScreen,
   zoomedViewport, pinchState, pinchedViewport, inWorld,
   trimStrokes as _trimStrokes, isValidRemoteStroke, isCursorStale, isCursorOnScreen,
+  parseCanvas, isNewerClear,
 } from "./logic.js";
 
 // ── Hub globals ──────────────────────────────────────────────────────────────
@@ -395,8 +396,7 @@ canvas.addEventListener("pointerup", e => {
   seenIds.add(stroke.id);
   strokes.push(stroke);
   current = null;
-  trimStrokes();
-  saveStrokes();
+  persistStroke(stroke);
   publishStroke(stroke);
   redrawAll();
 });
@@ -479,12 +479,16 @@ function onEvent(e) {
     const s = { id: strokeId, points, color, width, memberId, ts: Date.now() };
     strokes.push(s);
     renderStroke(s);
+    // Rendered, not persisted: the author already appended it. Every open tab
+    // writing the same stroke is how the canvas used to duplicate work and
+    // burn the write quota N times over.
     trimStrokes();
-    saveStrokes();
   } else if (e.type === "whiteboard.canvas_cleared") {
+    if (!isNewerClear(e.payload?.rev, canvasRev)) return;
+    canvasRev = Number(e.payload?.rev) || canvasRev + 1;
     strokes = [];
+    seenIds.clear();
     redrawAll();
-    saveStrokes();
   } else if (e.type === "whiteboard.cursor") {
     const { memberId, x, y } = e.payload ?? {};
     if (!memberId || memberId === ME?.id) return;
@@ -503,18 +507,40 @@ const stream = createStreamHelper(STREAM_URL, null, onEvent);
 stream.connect();
 
 // ── KV persistence ───────────────────────────────────────────────────────────
-let saveTimer = null;
+//
+// Only the client that DREW a stroke persists it, and it persists that stroke
+// alone (`array_append`, applied inside the store's serialized Durable Object).
+// Previously every client rewrote the entire array on every local and remote
+// stroke, which made concurrent drawing lossy, multiplied the write quota by
+// the number of open tabs, and let any stale client undo a clear by writing its
+// whole cached canvas back.
+let canvasRev = 0;
 
-function saveStrokes() {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(async () => {
-    if (!STORE) return;
-    await fetch(STORE, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: "strokes", value: JSON.stringify(strokes) }),
-    }).catch(() => {});
-  }, 500);
+/** Replaces the stored canvas outright. Used for the clear tombstone, the
+ *  one-time upgrade off the legacy bare-array shape, and compaction. */
+async function writeCanvas() {
+  if (!STORE) return false;
+  const res = await fetch(STORE, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key: "strokes", value: JSON.stringify({ rev: canvasRev, strokes }) }),
+  }).catch(() => null);
+  return Boolean(res?.ok);
+}
+
+async function persistStroke(stroke) {
+  if (!STORE) return;
+  const res = await fetch(STORE, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key: "strokes", ops: [{ op: "array_append", path: "strokes", value: stroke }] }),
+  }).catch(() => null);
+  // A household still on the legacy array shape has no "strokes" path to append
+  // to; upgrade it in place and carry on.
+  if (!res?.ok) await writeCanvas();
+  // Compaction is the one write that still rewrites the array, so it is done
+  // only when the cap is actually exceeded — by the client that exceeded it.
+  else if (strokes.length > MAX_STROKES) { trimStrokes(); await writeCanvas(); }
 }
 
 async function loadStrokes() {
@@ -523,9 +549,12 @@ async function loadStrokes() {
     const res  = await fetch(`${STORE}?key=strokes`);
     if (!res.ok) return;
     const json = await res.json();
-    strokes    = json.value ? JSON.parse(json.value) : [];
+    const canvas = parseCanvas(json.value ? JSON.parse(json.value) : null);
+    strokes   = canvas.strokes;
+    canvasRev = canvas.rev;
     for (const s of strokes) seenIds.add(s.id);
-  } catch { strokes = []; }
+    if (canvas.legacy) await writeCanvas();
+  } catch { strokes = []; canvasRev = 0; }
 }
 
 function trimStrokes() {
@@ -564,7 +593,7 @@ async function publishClear() {
     body: JSON.stringify({
       source_app_id: APP_ID,
       type: "whiteboard.canvas_cleared",
-      payload: { memberId: ME?.id ?? "anon" },
+      payload: { memberId: ME?.id ?? "anon", rev: canvasRev },
     }),
   }).catch(() => {});
 }
@@ -578,8 +607,18 @@ window.clearCanvas = async function() {
   });
   if (!ok) return;
   strokes = [];
+  seenIds.clear();
+  canvasRev += 1;
   redrawAll();
-  saveStrokes();
+  // The tombstone is written BEFORE the event goes out, so a client that reacts
+  // to the clear can never read a canvas that still holds the old strokes.
+  if (!await writeCanvas()) {
+    await hubAlert("The whiteboard could not be cleared.", { description: "Nothing was changed for anyone else. Try again." });
+    canvasRev -= 1;
+    await loadStrokes();
+    redrawAll();
+    return;
+  }
   publishClear();
 };
 
