@@ -11,8 +11,8 @@
     body {
       font-family: var(--hub-font, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
       font-size: 13px;
-      background: #fff;
-      color: #111827;
+      background: var(--hub-surface, #fff);
+      color: var(--hub-text, #111827);
       height: 100vh;
       overflow: hidden;
       display: flex;
@@ -27,13 +27,13 @@
       border-bottom: 1px solid #e5e7eb;
       flex-shrink: 0;
     }
-    .header-title { font-size: 13px; font-weight: 700; color: #111827; }
-    .header-sub   { font-size: 11px; color: #6b7280; }
+    .header-title { font-size: 13px; font-weight: 700; color: var(--hub-text, #111827); }
+    .header-sub   { font-size: 11px; color: var(--hub-text-muted, #6b7280); }
 
     #canvas-wrap {
       flex: 1;
       position: relative;
-      background: #ffffff;
+      background: var(--hub-surface, #ffffff);
       overflow: hidden;
     }
 
