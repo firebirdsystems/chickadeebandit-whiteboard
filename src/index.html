@@ -141,15 +141,23 @@
       border: 2px solid rgba(255,255,255,0.7);
       transition: left 0.05s, top 0.05s;
     }
+
+    .load-error { flex-shrink: 0; padding: 10px 14px; background: var(--hub-tint-danger, #fee2e2); color: var(--hub-tint-danger-fg, #b91c1c); font-size: 0.9rem; display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+    .load-error[hidden] { display: none; }
+    .load-error-retry { font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: var(--hub-radius, 6px); padding: 4px 10px; cursor: pointer; }
+    .save-state { position: absolute; top: 10px; right: 10px; padding: 4px 10px; border-radius: 999px; background: var(--hub-tint-danger, #fee2e2); color: var(--hub-tint-danger-fg, #b91c1c); font-size: 12px; pointer-events: none; }
   </style>
 </head>
 <body>
 
 <div id="toolbar"></div>
 
-<div id="canvas-wrap">
-  <canvas id="wb-canvas"></canvas>
+<div class="load-error" id="load-error" data-testid="load-error" role="alert" hidden><span>Couldn’t load the whiteboard.</span> <button type="button" class="load-error-retry" data-testid="load-retry" onclick="retryLoad()">Try again</button></div>
+
+<div id="canvas-wrap" data-testid="canvas-wrap">
+  <canvas id="wb-canvas" data-testid="canvas"></canvas>
   <div id="cursor-overlay"></div>
+  <div class="save-state" id="save-state" data-testid="save-state" role="status" hidden>Not saved</div>
 </div>
 
 <script type="module">
@@ -396,7 +404,9 @@ canvas.addEventListener("pointerup", e => {
   seenIds.add(stroke.id);
   strokes.push(stroke);
   current = null;
-  persistStroke(stroke);
+  saving += 1;
+  syncBoardState();
+  persistStroke(stroke).finally(() => { saving -= 1; syncBoardState(); });
   publishStroke(stroke);
   redrawAll();
 });
@@ -483,11 +493,14 @@ function onEvent(e) {
     // writing the same stroke is how the canvas used to duplicate work and
     // burn the write quota N times over.
     trimStrokes();
+    syncBoardState();
   } else if (e.type === "whiteboard.canvas_cleared") {
     if (!isNewerClear(e.payload?.rev, canvasRev)) return;
     canvasRev = Number(e.payload?.rev) || canvasRev + 1;
     strokes = [];
     seenIds.clear();
+    unsaved = [];
+    renderSaveState();
     redrawAll();
   } else if (e.type === "whiteboard.cursor") {
     const { memberId, x, y } = e.payload ?? {};
@@ -515,11 +528,70 @@ stream.connect();
 // the number of open tabs, and let any stale client undo a clear by writing its
 // whole cached canvas back.
 let canvasRev = 0;
+// True only once the stored canvas has been read in this session. Until then
+// the local `strokes` array says nothing about what is stored, so nothing may
+// replace the stored canvas with it.
+let canvasRead = false;
+let rosterRead = false; // the member list, read once on load and again on retry
+// True while the stored canvas is still the legacy bare array, which has no
+// "strokes" path for `array_append` to reach.
+let canvasLegacy = false;
+// Strokes drawn here whose save failed. They ride along with the next save.
+let unsaved = [];
+// Strokes drawn here whose save has been sent and not yet answered.
+let saving = 0;
+
+/** Mirrors the board's state onto the wrapper as attributes; the board itself
+ *  is pixels, so this is the only place a browser test can read it. */
+function syncBoardState() {
+  const wrap = document.getElementById("canvas-wrap");
+  wrap.dataset.strokes    = String(strokes.length);
+  wrap.dataset.unsaved    = String(unsaved.length);
+  wrap.dataset.saving     = String(saving);
+  wrap.dataset.canvasRead = String(canvasRead);
+}
+
+function renderSaveState() {
+  document.getElementById("save-state").hidden = unsaved.length === 0;
+  syncBoardState();
+  // Unsaved strokes are sent again on their own. Waiting for the next stroke
+  // to carry them lost them whenever the person simply stopped drawing.
+  if (unsaved.length && !retryTimer) retryTimer = setInterval(flushUnsaved, RETRY_UNSAVED_MS);
+  else if (!unsaved.length && retryTimer) { clearInterval(retryTimer); retryTimer = null; }
+}
+
+const RETRY_UNSAVED_MS = 5000;
+let retryTimer = null;
+let flushing = false;
+
+/** Sends the unsaved strokes, a batch at a time, until none are left or a save
+ *  fails. Not while the stored canvas is unread: retryLoad calls this once it
+ *  has been. */
+async function flushUnsaved() {
+  if (flushing || !canvasRead || !unsaved.length) return;
+  flushing = true;
+  try {
+    for (let before = unsaved.length; before > 0; before = unsaved.length) {
+      await persistStroke(null);
+      if (unsaved.length >= before) break;
+    }
+  } finally { flushing = false; }
+}
+
+function renderLoadState() {
+  syncBoardState();
+  const el = document.getElementById("load-error");
+  const read = canvasRead && rosterRead;
+  if (el.hidden === read) return;
+  el.hidden = read;
+  resizeCanvas();
+}
 
 /** Replaces the stored canvas outright. Used for the clear tombstone, the
- *  one-time upgrade off the legacy bare-array shape, and compaction. */
+ *  one-time upgrade off the legacy bare-array shape, and compaction. Refused
+ *  while the stored canvas is unread: the local copy would overwrite it. */
 async function writeCanvas() {
-  if (!STORE) return false;
+  if (!STORE || !canvasRead) return false;
   const res = await fetch(STORE, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -528,34 +600,72 @@ async function writeCanvas() {
   return Boolean(res?.ok);
 }
 
-async function persistStroke(stroke) {
-  if (!STORE) return;
+/** Appends strokes to the stored canvas. `array_append` skips a value that is
+ *  already stored, so sending a stroke twice is harmless. */
+async function appendStrokes(batch) {
   const res = await fetch(STORE, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ key: "strokes", ops: [{ op: "array_append", path: "strokes", value: stroke }] }),
+    body: JSON.stringify({ key: "strokes", ops: batch.map(value => ({ op: "array_append", path: "strokes", value })) }),
   }).catch(() => null);
-  // A household still on the legacy array shape has no "strokes" path to append
-  // to; upgrade it in place and carry on.
-  if (!res?.ok) await writeCanvas();
-  // Compaction is the one write that still rewrites the array, so it is done
-  // only when the cap is actually exceeded — by the client that exceeded it.
-  else if (strokes.length > MAX_STROKES) { trimStrokes(); await writeCanvas(); }
+  return Boolean(res?.ok);
 }
 
-async function loadStrokes() {
+async function persistStroke(stroke) {
   if (!STORE) return;
+  // Earlier strokes that failed to save go out again with this one (the store
+  // takes at most 50 ops per patch).
+  const batch = stroke ? [...unsaved.slice(0, 49), stroke] : unsaved.slice(0, 50);
+  if (!batch.length) return;
+  let saved = await appendStrokes(batch);
+  // A household still on the legacy array shape has no "strokes" path to append
+  // to; upgrade it in place and carry on. The whole local canvas goes with it.
+  if (!saved && canvasLegacy && await writeCanvas()) {
+    canvasLegacy = false;
+    unsaved = [];
+    renderSaveState();
+    return;
+  }
+  if (!saved) {
+    if (stroke && !unsaved.includes(stroke)) unsaved.push(stroke);
+    renderSaveState();
+    return;
+  }
+  unsaved = unsaved.filter(s => !batch.includes(s));
+  renderSaveState();
+  // Compaction is the one write that still rewrites the array, so it is done
+  // only when the cap is actually exceeded — by the client that exceeded it.
+  if (strokes.length > MAX_STROKES) { trimStrokes(); syncBoardState(); await writeCanvas(); }
+}
+
+/** Answers false when the stored canvas could not be read. */
+async function loadStrokes() {
+  if (!STORE) { canvasRead = true; return true; }
+  canvasRead = false;
+  syncBoardState();
   try {
     const res  = await fetch(`${STORE}?key=strokes`);
-    if (!res.ok) return;
+    if (!res.ok) return false;
     const json = await res.json();
     const canvas = parseCanvas(json.value ? JSON.parse(json.value) : null);
-    strokes   = canvas.strokes;
+    // Strokes still waiting to be saved stay on screen.
+    const stored = new Set(canvas.strokes.map(s => s.id));
+    strokes   = [...canvas.strokes, ...unsaved.filter(s => !stored.has(s.id))];
     canvasRev = canvas.rev;
     for (const s of strokes) seenIds.add(s.id);
-    if (canvas.legacy) await writeCanvas();
-  } catch { strokes = []; canvasRev = 0; }
+    canvasRead = true;
+    canvasLegacy = canvas.legacy;
+    if (canvas.legacy && await writeCanvas()) { canvasLegacy = false; unsaved = []; renderSaveState(); }
+    return true;
+  } catch { return false; }
 }
+
+window.retryLoad = async function() {
+  const [loaded] = await Promise.all([loadStrokes(), loadMembers().catch(() => {})]);
+  redrawAll();
+  renderLoadState();
+  if (loaded) flushUnsaved();
+};
 
 function trimStrokes() {
   if (strokes.length > MAX_STROKES) {
@@ -600,6 +710,12 @@ async function publishClear() {
 
 // ── Clear ────────────────────────────────────────────────────────────────────
 window.clearCanvas = async function() {
+  // Clearing writes the whole canvas, and an unread canvas is not this
+  // client's to replace.
+  if (STORE && !canvasRead) {
+    await hubAlert("The whiteboard has not loaded yet.", { description: "Use Try again, then clear it." });
+    return;
+  }
   const ok = await hubConfirm("Clear the whiteboard?", {
     description: "All strokes will be removed for everyone.",
     confirmLabel: "Clear",
@@ -610,6 +726,7 @@ window.clearCanvas = async function() {
   seenIds.clear();
   canvasRev += 1;
   redrawAll();
+  syncBoardState();
   // The tombstone is written BEFORE the event goes out, so a client that reacts
   // to the clear can never read a canvas that still holds the old strokes.
   if (!await writeCanvas()) {
@@ -617,8 +734,11 @@ window.clearCanvas = async function() {
     canvasRev -= 1;
     await loadStrokes();
     redrawAll();
+    renderLoadState();
     return;
   }
+  unsaved = [];
+  renderSaveState();
   publishClear();
 };
 
@@ -668,14 +788,14 @@ function renderToolbar() {
     <div class="toolbar-sep"></div>
     ${widths}
     <div class="toolbar-sep"></div>
-    <button class="tool-btn${isEraser ? " active" : ""}" onclick="toggleEraser()">
+    <button class="tool-btn${isEraser ? " active" : ""}" data-testid="tool-eraser" onclick="toggleEraser()">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M20 20H7L3 16l10-10 7 7-2.5 2.5"/><path d="M6.0001 11L13 18"/>
       </svg>
       Eraser
     </button>
     <div class="toolbar-sep"></div>
-    <button class="tool-btn danger" onclick="clearCanvas()">
+    <button class="tool-btn danger" data-testid="clear-board" onclick="clearCanvas()">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>
       </svg>
@@ -697,13 +817,19 @@ async function loadMembers() {
       { id: "demo-3", name: "Jamie", role: "child" },
     ];
     memberMap = new Map(members.map(m => [m.id, m]));
+    rosterRead = true;
     return;
   }
-  try {
-    const res = await fetch(`${CONTEXT}?keys=family.members`);
-    members   = ((await res.json())["family.members"]) ?? [];
-  } catch { members = []; }
+  rosterRead = false;
+  // A member list that could not be read is a failed load, not a household with nobody in it.
+  const res = await fetch(`${CONTEXT}?keys=family.members`);
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data || typeof data !== "object" || data.error) throw new Error("Couldn’t reach the hub. Try again.");
+  // A 200 that names the key in `$errors` is the hub saying it could not read it.
+  if (Array.isArray(data.$errors) && data.$errors.includes("family.members")) throw new Error("Couldn’t reach the hub. Try again.");
+  members = data["family.members"] ?? [];
   memberMap = new Map(members.map(m => [m.id, m]));
+  rosterRead = true;
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
@@ -712,8 +838,10 @@ window.addEventListener("resize", resizeCanvas);
 (async () => {
   renderToolbar();
   resizeCanvas();
-  await Promise.all([loadMembers(), loadStrokes()]);
+  syncBoardState();
+  await Promise.all([loadMembers().catch(() => {}), loadStrokes()]);
   redrawAll();
+  renderLoadState();
 })();
 </script>
 </body>

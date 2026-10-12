@@ -1,0 +1,252 @@
+{
+  "scenarios": [
+    {
+      "name": "a stroke drawn on the board is saved and is still there after a reload, and so is an eraser stroke",
+      "steps": [
+        {
+          "action": "open"
+        },
+        {
+          "action": "waitFor",
+          "selector": "[data-testid=\"canvas-wrap\"][data-canvas-read=\"true\"][data-strokes=\"0\"][data-unsaved=\"0\"]"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"canvas\"]"
+        },
+        {
+          "action": "drag",
+          "selector": "[data-testid=\"canvas\"]",
+          "byX": 120,
+          "byY": 60
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"canvas-wrap\"][data-strokes=\"1\"][data-unsaved=\"0\"][data-saving=\"0\"]"
+        },
+        {
+          "action": "expectHidden",
+          "selector": "[data-testid=\"save-state\"]"
+        },
+        {
+          "action": "reload"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"canvas-wrap\"][data-canvas-read=\"true\"][data-strokes=\"1\"][data-unsaved=\"0\"]"
+        },
+        {
+          "action": "expectHidden",
+          "selector": "[data-testid=\"load-error\"]"
+        },
+        {
+          "action": "click",
+          "selector": "[data-testid=\"tool-eraser\"]"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"tool-eraser\"].active"
+        },
+        {
+          "action": "drag",
+          "selector": "[data-testid=\"canvas\"]",
+          "byX": -90,
+          "byY": 70
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"canvas-wrap\"][data-strokes=\"2\"][data-unsaved=\"0\"][data-saving=\"0\"]"
+        },
+        {
+          "action": "reload"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"canvas-wrap\"][data-canvas-read=\"true\"][data-strokes=\"2\"][data-unsaved=\"0\"]"
+        },
+        {
+          "action": "expectHidden",
+          "selector": "[data-testid=\"save-state\"]"
+        }
+      ]
+    },
+    {
+      "name": "a failed save keeps the stroke and saves it by itself once the hub answers, without another stroke",
+      "steps": [
+        {
+          "action": "open"
+        },
+        {
+          "action": "waitFor",
+          "selector": "[data-testid=\"canvas-wrap\"][data-canvas-read=\"true\"][data-strokes=\"0\"][data-unsaved=\"0\"]"
+        },
+        {
+          "action": "drag",
+          "selector": "[data-testid=\"canvas\"]",
+          "byX": 120,
+          "byY": 60
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"canvas-wrap\"][data-strokes=\"1\"][data-unsaved=\"0\"][data-saving=\"0\"]"
+        },
+        {
+          "action": "fault",
+          "mode": "down"
+        },
+        {
+          "action": "drag",
+          "selector": "[data-testid=\"canvas\"]",
+          "byX": -100,
+          "byY": 80
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"canvas-wrap\"][data-strokes=\"2\"][data-unsaved=\"1\"][data-saving=\"0\"]"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"save-state\"]"
+        },
+        {
+          "action": "expectText",
+          "selector": "[data-testid=\"save-state\"]",
+          "text": "Not saved"
+        },
+        {
+          "action": "fault",
+          "mode": "none"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"canvas-wrap\"][data-strokes=\"2\"][data-unsaved=\"0\"][data-saving=\"0\"]"
+        },
+        {
+          "action": "expectHidden",
+          "selector": "[data-testid=\"save-state\"]"
+        },
+        {
+          "action": "reload"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"canvas-wrap\"][data-canvas-read=\"true\"][data-strokes=\"2\"][data-unsaved=\"0\"]"
+        },
+        {
+          "action": "expectHidden",
+          "selector": "[data-testid=\"load-error\"]"
+        }
+      ]
+    },
+    {
+      "name": "a board that could not be read is not overwritten",
+      "steps": [
+        {
+          "action": "open"
+        },
+        {
+          "action": "waitFor",
+          "selector": "[data-testid=\"canvas-wrap\"][data-canvas-read=\"true\"][data-strokes=\"0\"][data-unsaved=\"0\"]"
+        },
+        {
+          "action": "drag",
+          "selector": "[data-testid=\"canvas\"]",
+          "byX": 120,
+          "byY": 60
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"canvas-wrap\"][data-strokes=\"1\"][data-unsaved=\"0\"][data-saving=\"0\"]"
+        },
+        {
+          "action": "drag",
+          "selector": "[data-testid=\"canvas\"]",
+          "byX": -100,
+          "byY": 80
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"canvas-wrap\"][data-strokes=\"2\"][data-unsaved=\"0\"][data-saving=\"0\"]"
+        },
+        {
+          "action": "fault",
+          "mode": "down"
+        },
+        {
+          "action": "reload"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"load-error\"]"
+        },
+        {
+          "action": "expectText",
+          "selector": "[data-testid=\"load-error\"]",
+          "text": "Couldn’t load the whiteboard."
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"canvas-wrap\"][data-canvas-read=\"false\"][data-strokes=\"0\"][data-unsaved=\"0\"]"
+        },
+        {
+          "action": "drag",
+          "selector": "[data-testid=\"canvas\"]",
+          "byX": 60,
+          "byY": -90
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"canvas-wrap\"][data-canvas-read=\"false\"][data-strokes=\"1\"][data-unsaved=\"1\"][data-saving=\"0\"]"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"save-state\"]"
+        },
+        {
+          "action": "fault",
+          "mode": "none"
+        },
+        {
+          "action": "click",
+          "selector": "[data-testid=\"clear-board\"]"
+        },
+        {
+          "action": "dialog",
+          "answer": "accept",
+          "text": "The whiteboard has not loaded yet."
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"canvas-wrap\"][data-canvas-read=\"false\"][data-strokes=\"1\"][data-unsaved=\"1\"]"
+        },
+        {
+          "action": "click",
+          "selector": "[data-testid=\"load-retry\"]"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"canvas-wrap\"][data-canvas-read=\"true\"][data-strokes=\"3\"][data-unsaved=\"0\"][data-saving=\"0\"]"
+        },
+        {
+          "action": "expectHidden",
+          "selector": "[data-testid=\"load-error\"]"
+        },
+        {
+          "action": "expectHidden",
+          "selector": "[data-testid=\"save-state\"]"
+        },
+        {
+          "action": "reload"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"canvas-wrap\"][data-canvas-read=\"true\"][data-strokes=\"3\"][data-unsaved=\"0\"]"
+        },
+        {
+          "action": "expectHidden",
+          "selector": "[data-testid=\"load-error\"]"
+        }
+      ]
+    }
+  ]
+}
