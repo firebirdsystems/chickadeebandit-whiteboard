@@ -54,6 +54,7 @@
       color: #9ca3af;
       font-size: 12px;
     }
+    .load-error { margin: 8px; padding: 8px 10px; border-radius: 10px; background: var(--hub-tint-danger, #fee2e2); color: var(--hub-tint-danger-fg, #b91c1c); font-size: 0.8rem; }
   </style>
 </head>
 <body>
@@ -143,16 +144,20 @@ async function load() {
     return;
   }
 
+  // A canvas that could not be read is not an empty one: say so instead of
+  // "Nothing drawn yet". A key never written answers 200 { value: null }.
   let strokes = [];
   try {
     const res = await fetch(`${STORE}?key=strokes`);
-    if (res.ok) {
-      const json = await res.json();
-      // Reads both the current { rev, strokes } shape and the bare array
-      // households stored before the canvas gained a revision.
-      strokes = parseCanvas(json.value ? JSON.parse(json.value) : null).strokes;
-    }
-  } catch { /* show empty state */ }
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json || typeof json !== "object" || json.error) throw new Error("Couldn’t load the whiteboard.");
+    // Reads both the current { rev, strokes } shape and the bare array
+    // households stored before the canvas gained a revision.
+    strokes = parseCanvas(json.value ? JSON.parse(json.value) : null).strokes;
+  } catch {
+    wrap.innerHTML = `<div class="load-error" data-testid="load-error" role="alert">Couldn’t load the whiteboard.</div>`;
+    return;
+  }
 
   if (strokes.length === 0) {
     empty.style.display = "flex";
